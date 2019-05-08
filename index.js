@@ -22,7 +22,11 @@ const output = [];
  */
 
 /**
- * @type {Map<APItype, RespTime>}
+ * @typedef {number} NoOfHits
+ */
+
+/**
+ * @type {Map<APItype, {respTime: string, noOfHits: number}>}
  */
 const apiRespTimeTable = new Map()
 
@@ -61,10 +65,16 @@ csvParserWithReadStream
  * @property {string} url
  * @property {string} tenantName
  * @property {string} apiType
+ * @property {string} apiTypeTenantAgnostic
  * @property {string} method
- * @property {number} [respCode]
- * @property {number} [respTime]
+ * @property {string} [respCode]
+ * @property {string} [respTime]
+ * @property {string} bottleneckUID
+ * @property {string} plantUID
+ * @property {string} orgUID
+ * @property {string} lossReasonUID
  * @property {SpecialError} [specialError]
+ * @property {string} rawLog
  */
 
 /**
@@ -93,14 +103,15 @@ function getAPIdetails(log) {
   const matchedGroups = matchResult.groups;
 
   if (!matchedGroups) {
-    apiDetails = null;
-  } else if (matchedGroups.errorMessage) {
+    return null;
+  } if (matchedGroups.errorMessage) {
     apiDetails = handleSpecialError(matchedGroups);
   } else {
     // @ts-ignore
     apiDetails = matchedGroups;
   }
-
+  apiDetails.bottleneckUID = matchedGroups.bottleneckUIDForEorT || matchedGroups.bottleneckUIDForB || matchedGroups.optBottleneckUID;
+  apiDetails.rawLog = log
   // console.log(apiDetails);
 
   return apiDetails;
@@ -124,18 +135,36 @@ function handleSpecialError(matchedGroups) {
   apiDetails.method = matchedGroups.method;
   apiDetails.url = matchedGroups.url;
   apiDetails.apiType = matchedGroups.apiType;
+  apiDetails.apiTypeTenantAgnostic = matchedGroups.apiTypeTenantAgnostic;
   apiDetails.tenantName = matchedGroups.tenantName;
+  apiDetails.plantUID = matchedGroups.plantUID;
+  apiDetails.lossReasonUID = matchedGroups.lossReasonUID;
+  apiDetails.orgUID = matchedGroups.orgUID;
   apiDetails.specialError = specialError;
   return apiDetails;
 }
 
-const apiTypeRegEx = '(?<apiType>(entries|targets)\\?bottleneck_uid|sse_socket\\?subs|data_entry|logo|client_languages|clients|entries|bottlenecks|network|sub_losses|last_updated|global_losses\\?raw|loss_types\\?plant_uid|loss_reasons\\?opt_bottleneck_uid|loss_reasons\\?loss_reason_guid|projects\\?organization_uid|watches\\?raw)'
+const UIDregex = '[A-F0-9a-f]{8}(?:-[A-F0-9a-f]{4}){3}-[A-F0-9a-h]{12}'
+
+const bottleneckUIDregexForEorT = `(?<bottleneckUIDForEorT>${UIDregex})`
+
+const bottleneckUIDForB = `(?<bottleneckUIDForB>${UIDregex})`
+
+const optBottleneckUIDregex = `(?<optBottleneckUID>${UIDregex})`
+
+const plantUIDregex = `(?<plantUID>${UIDregex})`
+
+const lossReasonUIDregex = `(?<lossReasonUID>${UIDregex})`
+
+const orgUID = '(?<orgUID>\\w*)'
+
+const apiTypeRegEx = `(?<apiType>(?<tenantName>\\S+)\\/(?<apiTypeTenantAgnostic>(entries|targets)\\?bottleneck_uid=${bottleneckUIDregexForEorT}|sse_socket\\?subs|data_entry|logo|client_languages|clients|entries|bottlenecks|network|sub_losses|last_updated|global_losses\\?raw|loss_types\\?plant_uid=${plantUIDregex}|loss_reasons\\?opt_bottleneck_uid=${optBottleneckUIDregex}|loss_reasons\\?loss_reason_guid=${lossReasonUIDregex}|projects\\?organization_uid=${orgUID}|watches\\?raw|bottlenecks\\/${bottleneckUIDForB}))`
 
 const headerRegEx = /record\.log/;
 
 const methodRegEx = '(?<method>GET|POST|PUT|DELETE|PATCH)';
 
-const urlRegEx = `(?<url>\\/ils\\/pcubed\\/api\\/tenants\\/(?<tenantName>.*)\\/${apiTypeRegEx}.*)`;
+const urlRegEx = `(?<url>\\/ils\\/pcubed\\/api\\/tenants\\/${apiTypeRegEx}.*)`;
 
 const httpVerRegEx = '(?<httpVer>HTTP\\/\\d\\.\\d")';
 
