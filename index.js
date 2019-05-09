@@ -2,80 +2,125 @@
 const csv = require('csv');
 const fs = require('fs');
 const assert = require('assert');
+const Excel = require('exceljs');
+const lo = require('lodash')
 
 const csvParser = csv.parse();
 
 const csvFileReadStream = fs.createReadStream(
-  './dataset/pcubed-logs-22-00-to-22-01-lean.csv',
+  './dataset/pcubed-logs-during-downtime-4-30-T6-30-to-4-30-T7-30.csv',
 );
 
 const csvParserWithReadStream = csvFileReadStream.pipe(csvParser);
 
-const output = [];
+/**
+ * @type {APIanalysis}
+ */
+const apiAnalysis = new Map()
 
 /**
- * @typedef {string} APItype
+ * @type {APImetrics}
  */
-
-/**
- * @typedef {number} RespTime
- */
-
-/**
- * @typedef {number} NoOfHits
- */
-
-/**
- * @type {Map<APItype, {respTime: string, noOfHits: number}>}
- */
-const apiRespTimeTable = new Map()
+const DEFUALT_API_METRICS = {
+  avgRespTime: 0,
+  noOfHits: 0,
+  respCodeMetrics: {
+    200: 0, 302: 0, 304: 0, 401: 0, 403: 0, 404: 0, 500: 0, 503: 0, NoResp: 0, 400: 0,
+  },
+};
 
 csvParserWithReadStream
   .on('readable', () => {
-    let record;
+    let log;
     // eslint-disable-next-line no-cond-assign
-    while ((record = csvParserWithReadStream.read())) {
-      assert.strictEqual(record.length, 2);
-      const apiDetails = getAPIdetails(record[0]);
-      // const prevAvgTime = apiRespTimeTable.get(apiDetails.apiType)
-      // apiRespTimeTable.set(apiDetails.apiType)
-      output.push([apiDetails, record[1]]);
+    while ((log = csvParserWithReadStream.read())) {
+      assert.strictEqual(log.length, 1);
+      analyzeAPI(log[0]);
     }
   })
   .on('error', (err) => {
     console.error('some error occurred: ', err.message);
   })
-  .on('end', () => {
-    console.log('Reading csv ended. No of rows read:', output.length);
-    console.log(output)
+  .on('end', async () => {
+    console.log("Analysing API's done.");
+    console.log(apiAnalysis);
+    await generateReportInExcel();
   });
 
 /**
- * @typedef {Object} SpecialError
- * @property {string} errorMessage
- * @property {string} client
- * @property {string} server
- * @property {string} upstream
- * @property {string} host
- * @property {string} referrer
+ * @param {LogData} logData
  */
+function analyzeAPI(logData) {
+  if (logData === 'record.log') {
+    return;
+  }
 
-/**
- * @typedef {Object} APIdetails
- * @property {string} url
- * @property {string} tenantName
- * @property {string} apiType
- * @property {string} apiTypeTenantAgnostic
- * @property {string} method
- * @property {string} [respCode]
- * @property {string} [respTime]
- * @property {string} bottleneckUID
- * @property {string} plantUID
- * @property {string} orgUID
- * @property {string} lossReasonUID
- * @property {SpecialError} [specialError]
- * @property {string} rawLog
- */
+  const result = getAPIdetails(logData)
+
+  if (!result) {
+    return;
+  }
+
+  const {
+    apiType: currentApiType,
+    nonApiURL: currentNonApiURL,
+    respTime: currentAPIrespTime,
+    respCode: currentAPIrespCode,
+  } = result;
+
+  const key = currentApiType || currentNonApiURL
+
+  const {
+    avgRespTime: prevAvgRespTime,
+    respCodeMetrics,
+    noOfHits: prevNoOfHits,
+  } = apiAnalysis.get(key) || lo.cloneDeep(DEFUALT_API_METRICS);
+
+  const newNoOfHits = prevNoOfHits + 1;
+
+  const newAvgRespTime = (prevAvgRespTime * prevNoOfHits + Number(currentAPIrespTime)) / newNoOfHits;
+
+  respCodeMetrics[currentAPIrespCode] += 1
+
+  apiAnalysis.set(key, {
+    noOfHits: newNoOfHits,
+    avgRespTime: newAvgRespTime,
+    respCodeMetrics,
+  });
+}
+
+async function generateReportInExcel() {
+  const workbook = new Excel.Workbook();
+  const worksheet = workbook.addWorksheet('API-analysis-during-downtime-4-30-T6-30-to-4-30-T7-30');
+  worksheet.columns = [
+    { header: 'API-URL', key: 'apiURL', width: 100 },
+    // { header: 'Method', key: 'method' },
+    { header: 'AvgRespTime', key: 'avgRespTime', width: 20 },
+    { header: 'NoOfHits', key: 'noOfHits', width: 20 },
+    { header: '200', key: '200' },
+    { header: '500', key: '500' },
+    { header: 'NoResp', key: 'NoResp' },
+    { header: '400', key: '400' },
+    { header: '401', key: '401' },
+    { header: '302', key: '302' },
+    { header: '304', key: '304' },
+    { header: '403', key: '403' },
+    { header: '404', key: '404' },
+    { header: '503', key: '503' },
+  ];
+  worksheet.getRow(1).eachCell((cell) => {
+    // eslint-disable-next-line no-param-reassign
+    cell.font = { bold: true };
+  });
+  apiAnalysis.forEach((APImetrics, apiURL) => {
+    const { avgRespTime, noOfHits, respCodeMetrics } = APImetrics;
+    const row = {
+      apiURL, avgRespTime, noOfHits, ...respCodeMetrics,
+    }
+    worksheet.addRow(row);
+  });
+  await workbook.xlsx.writeFile('API-ANALYSIS-during-downtime-4-30-T6-30-to-4-30-T7-30.xlsx');
+}
 
 /**
  *
@@ -84,119 +129,75 @@ csvParserWithReadStream
  */
 function getAPIdetails(log) {
   // console.log(log)
-  /**
-   * @type {APIdetails}
-   */
-  let apiDetails;
-  const matchResult = log.match(headerRegEx)
-    || log.match(logTypeAorCregex)
-    || log.match(logTypeBorDregex)
-    || log.match(logTypeEregex)
-    || log.match(logTypeFregex);
+  const matchResult = log.match(logRegex)
 
   if (!matchResult) {
-    throw Error(
-      `Did not match any regex for ------->${log}<--------, build new one`,
-    );
+    return null
   }
 
   const matchedGroups = matchResult.groups;
 
   if (!matchedGroups) {
-    return null;
-  } if (matchedGroups.errorMessage) {
-    apiDetails = handleSpecialError(matchedGroups);
-  } else {
-    // @ts-ignore
-    apiDetails = matchedGroups;
+    throw Error(
+      `Did not capture any groups in regex for ------->${log}<--------`,
+    );
   }
-  apiDetails.bottleneckUID = matchedGroups.bottleneckUIDForEorT || matchedGroups.bottleneckUIDForB || matchedGroups.optBottleneckUID;
-  apiDetails.rawLog = log
+  /**
+   * @type {APIdetails}
+   */
+  // @ts-ignore
+  const apiDetails = matchedGroups
+
+  apiDetails.bottleneckUID = matchedGroups.bottleneckUIDForEorT
+    || matchedGroups.bottleneckUIDForB
+    || matchedGroups.optBottleneckUID;
+  apiDetails.rawLog = log;
   // console.log(apiDetails);
 
   return apiDetails;
 }
 
-function handleSpecialError(matchedGroups) {
-  /**
-   * @type {SpecialError}
-   */
-  const specialError = {};
-  specialError.client = matchedGroups.client;
-  specialError.errorMessage = matchedGroups.errorMessage;
-  specialError.host = matchedGroups.host;
-  specialError.referrer = matchedGroups.referrer;
-  specialError.server = matchedGroups.server;
-  specialError.upstream = matchedGroups.upstream;
-  /**
-   * @type {APIdetails}
-   */
-  const apiDetails = {};
-  apiDetails.method = matchedGroups.method;
-  apiDetails.url = matchedGroups.url;
-  apiDetails.apiType = matchedGroups.apiType;
-  apiDetails.apiTypeTenantAgnostic = matchedGroups.apiTypeTenantAgnostic;
-  apiDetails.tenantName = matchedGroups.tenantName;
-  apiDetails.plantUID = matchedGroups.plantUID;
-  apiDetails.lossReasonUID = matchedGroups.lossReasonUID;
-  apiDetails.orgUID = matchedGroups.orgUID;
-  apiDetails.specialError = specialError;
-  return apiDetails;
-}
+const UIDregex = '[A-F0-9a-f]{8}(?:-[A-F0-9a-f]{4}){3}-[A-F0-9a-h]{12}';
 
-const UIDregex = '[A-F0-9a-f]{8}(?:-[A-F0-9a-f]{4}){3}-[A-F0-9a-h]{12}'
+const bottleneckUIDregexForEorT = `(?<bottleneckUIDForEorT>${UIDregex})`;
 
-const bottleneckUIDregexForEorT = `(?<bottleneckUIDForEorT>${UIDregex})`
+const bottleneckUIDForB = `(?<bottleneckUIDForB>${UIDregex})`;
 
-const bottleneckUIDForB = `(?<bottleneckUIDForB>${UIDregex})`
+const optBottleneckUIDregex = `(?<optBottleneckUID>${UIDregex})`;
 
-const optBottleneckUIDregex = `(?<optBottleneckUID>${UIDregex})`
+const plantUIDregex = `(?<plantUID>${UIDregex})`;
 
-const plantUIDregex = `(?<plantUID>${UIDregex})`
+const lossReasonUIDregex = `(?<lossReasonUID>${UIDregex})`;
 
-const lossReasonUIDregex = `(?<lossReasonUID>${UIDregex})`
+const orgUID = '(?<orgUID>\\w*)';
 
-const orgUID = '(?<orgUID>\\w*)'
-
-const apiTypeRegEx = `(?<apiType>(?<tenantName>\\S+)\\/(?<apiTypeTenantAgnostic>(entries|targets)\\?bottleneck_uid=${bottleneckUIDregexForEorT}|sse_socket\\?subs|data_entry|logo|client_languages|clients|entries|bottlenecks|network|sub_losses|last_updated|global_losses\\?raw|loss_types\\?plant_uid=${plantUIDregex}|loss_reasons\\?opt_bottleneck_uid=${optBottleneckUIDregex}|loss_reasons\\?loss_reason_guid=${lossReasonUIDregex}|projects\\?organization_uid=${orgUID}|watches\\?raw|bottlenecks\\/${bottleneckUIDForB}))`
-
-const headerRegEx = /record\.log/;
+const apiURLtypeRegex = `api\\/tenants\\/(?<apiURL>(?<apiType>(?<tenantName>.*)\\/(entries|targets)\\?bottleneck_uid=${bottleneckUIDregexForEorT}|sse_socket\\?subs|data_entry|logo|client_languages|changeovers|reports\\/loss_reasons_pareto|reports\\/waterfall|clients|machine_types\\?raw=[1,0]|entries|bottlenecks|network|sub_losses|last_updated|shifts|global_losses\\?raw|loss_types\\?plant_uid=${plantUIDregex}|loss_reasons\\?opt_bottleneck_uid=${optBottleneckUIDregex}|loss_reasons\\?loss_reason_guid=${lossReasonUIDregex}|projects\\?organization_uid=${orgUID}|watches\\?raw|bottlenecks\\/${bottleneckUIDForB}).*)`;
 
 const methodRegEx = '(?<method>GET|POST|PUT|DELETE|PATCH)';
 
-const urlRegEx = `(?<url>\\/ils\\/pcubed\\/api\\/tenants\\/${apiTypeRegEx}.*)`;
+const fullURLregex = `(?<fullURL>\\/+ils\\/pcubed\\/(${apiURLtypeRegex})|(?<nonApiURL>.*))`;
 
-const httpVerRegEx = '(?<httpVer>HTTP\\/\\d\\.\\d")';
+// const httpVerRegEx = '(?<httpVer>HTTP\\/\\d\\.\\d")';
 
 const respCodeRegEx = '(?<respCode>\\d{3})';
 
-const respTimeRegEx = '(?<respTime>\\d*\\S?s?)';
+const respTimeRegEx = '(?<respTime>\\d*)\\D?s?';
 
 const trailingRegex = '(?<garbage>"-"|"https:|→|× JSON)';
 
-const logTypeAorCregex = new RegExp(
-  `${methodRegEx} ${urlRegEx} ${httpVerRegEx} ${respCodeRegEx} ${respTimeRegEx} ${trailingRegex}`,
+// const logTypeAorCregex = new RegExp(
+//   `${methodRegEx} ${fullURLregex} ${httpVerRegEx} ${respCodeRegEx} ${respTimeRegEx} ${trailingRegex}`,
+// );
+
+const logRegex = new RegExp(
+  `${respCodeRegEx} ${respTimeRegEx} ${methodRegEx} ${fullURLregex} ${trailingRegex}`,
 );
 
-const logTypeBorDregex = new RegExp(
-  `${respCodeRegEx} ${respTimeRegEx} ${methodRegEx} ${urlRegEx} ${trailingRegex}`,
-);
+// const logTypeEregex = new RegExp(
+//   `\\[error\\] \\d*#\\d*: (?<errorMessage>.*), client: (?<client>.*), server: (?<server>.*), request: "${methodRegEx} ${fullURLregex} ${httpVerRegEx}, upstream: "(?<upstream>.*)", host: "(?<host>.*)", referrer: "(?<referrer>.*)"`,
+// );
 
-const logTypeEregex = new RegExp(
-  `\\[error\\] \\d*#\\d*: (?<errorMessage>.*), client: (?<client>.*), server: (?<server>.*), request: "${methodRegEx} ${urlRegEx} ${httpVerRegEx}, upstream: "(?<upstream>.*)", host: "(?<host>.*)", referrer: "(?<referrer>.*)"`,
-);
-// const logTypeEregEx = /\[error\] \d*#\d*: .*/;
-
-const logTypeFregex = new RegExp(`Request: ${methodRegEx} ${urlRegEx}`);
-
-// const trailingGarbageRegex = /( (→|× JSON)|("-"|"https:))/;
-
-// const API_URL_REGEXs = [
-//   /\/ils\/pcubed\/api\/tenants\/\w*-\w*\/sse_socket.* HTTP\/\d\.\d/,
-//   /\/ils\/pcubed\/api\/tenants\/\w*-\w*\/data_entry.* HTTP\/\d\.\d/,
-//   /\/ils\/pcubed\/api\/tenants\/\w*-\w*\/entries?bottleneck_uid=.* HTTP\/\d\.\d/,
-//   /\/ils\/pcubed\/api\/tenants\/\w*-\w*\/targets?bottleneck_uid=.* HTTP\/\d\.\d/,
-// ]
+// const logTypeFregex = new RegExp(`Request: ${methodRegEx} ${fullURLregex}`);
 
 /* eslint-disable */
 // Types of logs
@@ -220,18 +221,54 @@ const logTypeFregex = new RegExp(`Request: ${methodRegEx} ${urlRegEx}`);
 2019/04/22 00:38:30 [error] 57#57: *3074539 upstream prematurely closed connection while reading upstream, client: 199.248.185.22, server: ils-bravos-ui.mvp01.prod.nvt.mckinsey.cloud, request: "GET /ils/pcubed/api/tenants/pcubed-uss/sse_socket?subs=uss_84pkl,71dc7ed4-c2fd-4aae-a2f4-35c20d816de6 HTTP/1.1", upstream: "http://100.112.132.215:8000/ils/pcubed/api/tenants/pcubed-uss/sse_socket?subs=uss_84pkl,71dc7ed4-c2fd-4aae-a2f4-35c20d816de6", host: "ils-bravos-ui.mvp01.prod.nvt.mckinsey.cloud", referrer: "https://solutions.mckinsey.com/ils/pcubed/"
 */
 
-const roughWork = `
-// const sanitizedLog = log.replace(/"https:\/\/solutions.mckinsey.com\/ils\/pcubed\/.*/, '')
-//   .replace(/Mozilla\/\d\.\d.*/, '')
-//   .replace(/(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/g, '')
-//   .replace(' - [] - - ', '')
-// const sanitizedLog = log.replace(/Mozilla\/\d{1,4}.\d{1,4}/, '')
-//   .replace(/\(Windows NT \d.\d\)/, '')
-//   .replace(/AppleWebKit\/\d{1,4}.\d{1,4}/, '')
-//   .replace(/\(KHTML, like Gecko\)/, '')
-//   .replace(/Chrome\/\d{1,4}.\d{1,4}.\d{1,4}.\d{1,4}/, '')
-//   .replace(/Safari\/\d{1,4}.\d{1,4}/, '')
-//   .replace(/(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/g, '')
-//   .replace(' - [] - - ', '')
-`;
+/**
+ * @typedef {string} API_URL
+ */
+
+/**
+ * @typedef {string} LogData
+ */
+
+/**
+ * @typedef {string} Timestamp
+ */
+
+/**
+ * @typedef {{avgRespTime: number, noOfHits: number, respCodeMetrics: RespCodeMetrics }} APImetrics
+ */
+
+/**
+ * @typedef {Object} SpecialError
+ * @property {string} errorMessage
+ * @property {string} client
+ * @property {string} server
+ * @property {string} upstream
+ * @property {string} host
+ * @property {string} referrer
+ */
+
+/**
+ * @typedef {Object} APIdetails
+ * @property {string} fullURL
+ * @property {string} tenantName
+ * @property {string} nonApiURL
+ * @property {string} apiURL
+ * @property {string} apiType
+ * @property {string} method
+ * @property {string} respCode
+ * @property {string} respTime
+ * @property {string} bottleneckUID
+ * @property {string} plantUID
+ * @property {string} orgUID
+ * @property {string} lossReasonUID
+ * @property {string} rawLog
+ */
+
+/**
+ * @typedef {Map<API_URL, APImetrics>} APIanalysis
+ */
+
+/**
+ * @typedef {{'200': number, '503': number, '400': number, '401': number, '304': number, '302': number, '404': number, '500': number, '403': number, 'NoResp': number}} RespCodeMetrics
+ */
 /* eslint-enable */

@@ -1,2 +1,5 @@
 node_modules
 dataset
+*.xlsx
+.DS_Store
+launch.json
